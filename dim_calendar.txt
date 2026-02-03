@@ -1,0 +1,259 @@
+let
+    /*********************************************************************
+    CONFIGURACION DEL RANGO DE FECHAS DEL CALENDARIO
+    ----------------------------------------------------------------------
+    OPCION A – RANGO DINAMICO BASADO EN TABLAS DE HECHOS (RECOMENDADO)
+    ----------------------------------------------------------------------
+    Descomentar y adaptar estas lineas si se desea que el calendario
+    se genere automaticamente a partir de las fechas minimas y maximas
+    de las tablas de hechos.
+    
+    FechaInicioCalendario =
+        DateTime.Date(
+            Record.Field(
+                Table.Min(#"Fact_YYY", "date"),
+                "date"
+            )
+        ),
+
+    FechaFinCalendario =
+        DateTime.Date(
+            Record.Field(
+                Table.Max(#"Fact_XXX", "date"),
+                "date"
+            )
+        ),
+    *********************************************************************/
+
+    /*********************************************************************
+    OPCION B – RANGO SEMI-DINAMICO (ACTUAL)
+    ----------------------------------------------------------------------
+    - Inicio: 1 de enero de hace 5 anos
+    - Fin: ultimo dia del ano actual
+    *********************************************************************/
+    FechaInicioCalendario =
+        #date(
+            Date.Year(Date.AddYears(DateTime.Date(DateTime.LocalNow()), -5)),
+            1,
+            1
+        ),
+
+    FechaFinCalendario =
+        Date.EndOfYear(DateTime.Date(DateTime.LocalNow())),
+
+    Hoy = DateTime.Date(DateTime.LocalNow()),
+
+    /*********************************************************************
+    GENERACION DE FECHAS
+    *********************************************************************/
+    NumeroDias =
+        Duration.Days(FechaFinCalendario - FechaInicioCalendario) + 1,
+
+    ListaFechas =
+        List.Dates(
+            FechaInicioCalendario,
+            NumeroDias,
+            #duration(1, 0, 0, 0)
+        ),
+
+    TablaBase =
+        Table.FromList(
+            ListaFechas,
+            Splitter.SplitByNothing(),
+            {"Date"},
+            null,
+            ExtraValues.Error
+        ),
+
+    TablaFechas =
+        Table.TransformColumnTypes(
+            TablaBase,
+            {{"Date", type date}}
+        ),
+
+    /*********************************************************************
+    ATRIBUTOS BASICOS
+    *********************************************************************/
+    AddYear =
+        Table.AddColumn(TablaFechas, "Ano", each Date.Year([Date]), Int64.Type),
+
+    AddMonth =
+        Table.AddColumn(AddYear, "Mes", each Date.Month([Date]), Int64.Type),
+
+    AddMonthName =
+        Table.AddColumn(AddMonth, "NombreMes", each Date.MonthName([Date], "es-ES"), type text),
+
+    AddWeekOfYear =
+        Table.AddColumn(AddMonthName, "SemanaAno", each Date.WeekOfYear([Date]), Int64.Type),
+
+    AddDay =
+        Table.AddColumn(AddWeekOfYear, "Dia", each Date.Day([Date]), Int64.Type),
+
+    AddDayOfWeek =
+        Table.AddColumn(AddDay, "DiaSemana", each Date.DayOfWeek([Date]), Int64.Type),
+
+    /*********************************************************************
+    CALENDARIO FISCAL (INICIO EN SEPTIEMBRE)
+    *********************************************************************/
+    AddFiscalYear =
+        Table.AddColumn(
+            AddDayOfWeek,
+            "AnoFiscal",
+            each if [Mes] >= 9 then [Ano] else [Ano] - 1,
+            Int64.Type
+        ),
+
+    AddFiscalYearLabel =
+        Table.AddColumn(
+            AddFiscalYear,
+            "AnoFiscalLabel",
+            each
+                if [Mes] >= 9 then
+                    Text.From([Ano]) & "/" & Text.From([Ano] + 1)
+                else
+                    Text.From([Ano] - 1) & "/" & Text.From([Ano]),
+            type text
+        ),
+
+    /*********************************************************************
+    FLAGS TEMPORALES
+    *********************************************************************/
+    AddIsToday =
+        Table.AddColumn(AddFiscalYearLabel, "IsToday", each [Date] = Hoy, type logical),
+
+    AddIsCurrentYear =
+        Table.AddColumn(AddIsToday, "IsCurrentYear", each [Ano] = Date.Year(Hoy), type logical),
+
+    AddIsCurrentMonth =
+        Table.AddColumn(
+            AddIsCurrentYear,
+            "IsCurrentMonth",
+            each [Ano] = Date.Year(Hoy) and [Mes] = Date.Month(Hoy),
+            type logical
+        ),
+
+    AddIsCurrentWeek =
+        Table.AddColumn(
+            AddIsCurrentMonth,
+            "IsCurrentWeek",
+            each
+                Date.Year([Date]) = Date.Year(Hoy)
+                and Date.WeekOfYear([Date]) = Date.WeekOfYear(Hoy),
+            type logical
+        ),
+
+    AddIsYTD =
+        Table.AddColumn(
+            AddIsCurrentWeek,
+            "IsYTD",
+            each [Date] <= Hoy and [Ano] = Date.Year(Hoy),
+            type logical
+        ),
+
+    AddIsFiscalYear =
+        Table.AddColumn(
+            AddIsYTD,
+            "IsFiscalYear",
+            each
+                [AnoFiscal]
+                    = (
+                        if Date.Month(Hoy) >= 9
+                        then Date.Year(Hoy)
+                        else Date.Year(Hoy) - 1
+                    ),
+            type logical
+        ),
+
+    AddIsCurrentFiscalYear =
+        Table.AddColumn(
+            AddIsFiscalYear,
+            "IsCurrentFiscalYear",
+            each [IsFiscalYear],
+            type logical
+        ),
+
+    /*********************************************************************
+    ROLLING WINDOWS
+    *********************************************************************/
+    AddRolling12 =
+        Table.AddColumn(
+            AddIsCurrentFiscalYear,
+            "IsRolling12",
+            each
+                [Date] >= Date.AddMonths(Date.StartOfMonth(Hoy), -11)
+                and [Date] <= Hoy,
+            type logical
+        ),
+
+    AddRolling24 =
+        Table.AddColumn(
+            AddRolling12,
+            "IsRolling24",
+            each
+                [Date] >= Date.AddMonths(Date.StartOfMonth(Hoy), -23)
+                and [Date] <= Hoy,
+            type logical
+        ),
+
+    AddRollingFiscal12 =
+        Table.AddColumn(
+            AddRolling24,
+            "IsRollingFiscal12",
+            each
+                [Date] >=
+                    Date.AddMonths(
+                        Date.StartOfMonth(
+                            #date(
+                                if Date.Month(Hoy) >= 9 then Date.Year(Hoy) else Date.Year(Hoy) - 1,
+                                9,
+                                1
+                            )
+                        ),
+                        -11
+                    )
+                and [Date] <= Hoy,
+            type logical
+        ),
+
+    /*********************************************************************
+    MTD / QTD / FYTD
+    *********************************************************************/
+    AddMTD =
+        Table.AddColumn(
+            AddRollingFiscal12,
+            "IsMTD",
+            each [Date] >= Date.StartOfMonth(Hoy) and [Date] <= Hoy,
+            type logical
+        ),
+
+    AddQTD =
+        Table.AddColumn(
+            AddMTD,
+            "IsQTD",
+            each [Date] >= Date.StartOfQuarter(Hoy) and [Date] <= Hoy,
+            type logical
+        ),
+
+    AddFYTD =
+        Table.AddColumn(
+            AddQTD,
+            "IsFYTD",
+            each
+                [Date] >=
+                    #date(
+                        if Date.Month(Hoy) >= 9 then Date.Year(Hoy) else Date.Year(Hoy) - 1,
+                        9,
+                        1
+                    )
+                and [Date] <= Hoy,
+            type logical
+        ),
+
+    /*********************************************************************
+    ORDEN FINAL
+    *********************************************************************/
+    CalendarioFinal =
+        Table.Sort(AddFYTD, {{"Date", Order.Ascending}})
+
+in
+    CalendarioFinal
